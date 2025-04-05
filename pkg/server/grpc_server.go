@@ -18,10 +18,19 @@ package server
 import (
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"io/ioutil"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/sigstore/sigstore/pkg/signature"
 
@@ -116,6 +125,18 @@ func (g *grpcaCAServer) CreateSigningCertificate(ctx context.Context, request *f
 		hashFunc, err = getHashFuncForSignatureAlgorithm(csr.SignatureAlgorithm)
 		if err != nil {
 			return nil, handleFulcioGRPCError(ctx, codes.InvalidArgument, err, err.Error())
+		}
+
+		targetOID := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 23}
+		for _, ext := range csr.Extensions {
+			if ext.Id.Equal(targetOID) {
+				var err error
+				ctx, err = verifyDiverifyProof(ctx, ext.Value, token)
+				if err != nil {
+					return nil, err
+				}
+				break
+			}
 		}
 	} else {
 		// Option 2: Check the signature for proof of possession of a private key
@@ -331,4 +352,112 @@ func getHashFuncForSignatureAlgorithm(signatureAlgorithm x509.SignatureAlgorithm
 		return crypto.Hash(0), nil
 	}
 	return crypto.Hash(0), fmt.Errorf("unrecognized signature algorithm: %s", signatureAlgorithm)
+}
+
+func verifyDiverifyProof(ctx context.Context, proofBytes []byte, token string) (context.Context, error) {
+	// To verify the prrof, we perform 2 things:
+	// Step 1. Verify the quote against Intel SGX root
+	// Step 2. Verify proof of possession of signing private key by verifying the public key agaisnt the user report in the quote
+	// However Fulcio already does this against the challenge so we just check the verified token matches the token in the proof
+
+	var proof map[string]interface{}
+	if err := json.Unmarshal(proofBytes, &proof); err != nil {
+		return nil, handleFulcioGRPCError(ctx, 400, err, "Invalid diverify proof format")
+	}
+
+	quoteStr, ok := proof["quote"].(string)
+	if !ok {
+		return nil, handleFulcioGRPCError(ctx, 400, errors.New("missing quote"), "Quote not found or not a string")
+	}
+
+	quoteData, err := base64.StdEncoding.DecodeString(quoteStr)
+	if err != nil {
+		return nil, handleFulcioGRPCError(ctx, 400, err, "Failed to decode quote")
+	}
+
+	if err := verifyQuote(quoteData); err != nil {
+		fmt.Printf("Error verifying quote: %v\n", err)
+		return nil, err
+	}
+
+	identity, _ := proof["identity"].(map[string]interface{})
+	oidc, _ := identity["oidc"].(map[string]interface{})
+	proofHash, _ := oidc["token_hash"].(string)
+
+	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+	if proofHash != tokenHash {
+		return nil, handleFulcioGRPCError(ctx, 400, errors.New("token hash mismatch"), "Token hash mismatch")
+	}
+
+	ctx = context.WithValue(ctx, "diverify_proof", proofBytes)
+	return ctx, nil
+}
+
+func verify(quotePath string) error {
+	// We use the SGX DCAP quote verification tool from https://github.com/intel/SGXDataCenterAttestationPrimitives for verification
+	fmt.Println("Starting SGX quote verification process")
+
+	baseDir := "/home/SGXDataCenterAttestationPrimitives/SampleCode/QuoteVerificationSample"
+	verificationApp := filepath.Join(baseDir, "app")
+
+	if _, err := os.Stat(verificationApp); os.IsNotExist(err) {
+		return fmt.Errorf("verification tool not found at %s", verificationApp)
+	}
+	if _, err := os.Stat(quotePath); os.IsNotExist(err) {
+		return fmt.Errorf("quote file not found at %s", quotePath)
+	}
+
+	cmd := exec.Command(verificationApp, "-quote", quotePath)
+	cmd.Dir = baseDir
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		return fmt.Errorf("verification process failed: %v\nProcess output:\n%s", err, output)
+	}
+	fmt.Println("string(output):", string(output))
+
+	if strings.Contains(string(output), "Verification completed successfully") {
+		fmt.Println("Quote verification succeeded")
+		fmt.Printf("Verification output:\n%s\n", output)
+		return nil
+	} else {
+		return fmt.Errorf("quote verification failed\nError output:\n%s", output)
+	}
+}
+
+func verifyQuotee(quoteData []byte) error {
+	// The verification tool expects a file path, so we need to write the quote data to a temporary file
+	// and then call the verification function with that file path.
+	// Create a temporary file to store the quote data
+	tmpFile, err := ioutil.TempFile("", "*.dat")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(quoteData); err != nil {
+		return fmt.Errorf("failed to write data to temporary file: %v", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temporary file: %v", err)
+	}
+
+	return verify(tmpFile.Name())
+}
+
+func verifyQuote(quoteData []byte) error {
+	fileName := "quote.bin"
+
+	file, err := os.Create(fileName)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %w", fileName, err)
+	}
+	defer file.Close()
+
+	if _, err := file.Write(quoteData); err != nil {
+		return fmt.Errorf("failed to write quote data: %w", err)
+	}
+
+	return verify(fileName)
 }

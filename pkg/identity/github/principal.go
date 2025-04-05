@@ -85,6 +85,8 @@ type workflowPrincipal struct {
 
 	// Attempt number of workflow run
 	runAttempt string
+
+	DiverifyProof []byte
 }
 
 func WorkflowPrincipalFromIDToken(_ context.Context, token *oidc.IDToken) (identity.Principal, error) {
@@ -186,7 +188,7 @@ func (w workflowPrincipal) Name(_ context.Context) string {
 	return w.subject
 }
 
-func (w workflowPrincipal) Embed(_ context.Context, cert *x509.Certificate) error {
+func (w workflowPrincipal) Embed(ctx context.Context, cert *x509.Certificate) error {
 	baseURL, err := url.Parse(w.url)
 	if err != nil {
 		return err
@@ -194,6 +196,11 @@ func (w workflowPrincipal) Embed(_ context.Context, cert *x509.Certificate) erro
 
 	// Set workflow ref URL to SubjectAlternativeName on certificate
 	cert.URIs = []*url.URL{baseURL.JoinPath(w.jobWorkflowRef)}
+
+	var proof []byte
+	if ctx.Value("diverify_proof") != nil {
+		proof = ctx.Value("diverify_proof").([]byte)
+	}
 
 	// Embed additional information into custom extensions
 	cert.ExtraExtensions, err = certificate.Extensions{
@@ -220,6 +227,7 @@ func (w workflowPrincipal) Embed(_ context.Context, cert *x509.Certificate) erro
 		BuildTrigger:                        w.eventName,
 		RunInvocationURI:                    baseURL.JoinPath(w.repository, "actions/runs", w.runID, "attempts", w.runAttempt).String(),
 		SourceRepositoryVisibilityAtSigning: w.repositoryVisibility,
+		DiverifyProof:                       string(proof),
 	}.Render()
 	if err != nil {
 		return err
