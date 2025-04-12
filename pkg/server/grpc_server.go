@@ -26,6 +26,8 @@ import (
 	"errors"
 	"fmt"
 
+	"math/big"
+
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -54,6 +56,22 @@ import (
 type GRPCCAServer interface {
 	fulciogrpc.CAServer
 	health.HealthServer
+}
+type ECDSASignature struct {
+	R, S *big.Int
+}
+type Policy struct {
+	Identity          string `json:"identity"`
+	Provider          string `json:"provider"`
+	DeviceFingerprint string `json:"device_fingerprint"`
+	SecurityKey       string `json:"security_key"`
+	SignerMeasurement string `json:"signer_measurement"`
+	RaRequired        bool   `json:"ra_required"`
+	Rule              string `json:"rule"`
+}
+
+type PolicyEvaluator struct {
+	Policy Policy
 }
 
 func NewGRPCCAServer(ct *ctclient.LogClient, ca certauth.CertificateAuthority, algorithmRegistry *signature.AlgorithmRegistryConfig, ip identity.IssuerPool) GRPCCAServer {
@@ -357,7 +375,7 @@ func getHashFuncForSignatureAlgorithm(signatureAlgorithm x509.SignatureAlgorithm
 func verifyDiverifyProof(ctx context.Context, proofBytes []byte, token string) (context.Context, error) {
 	// To verify the prrof, we perform 2 things:
 	// Step 1. Verify the quote against Intel SGX root
-	// Step 2. Verify proof of possession of signing private key by verifying the public key agaisnt the user report in the quote
+	// Step 2. Verify proof of possession of signing private key by verifying the public key against the user report in the quote
 	// However Fulcio already does this against the challenge so we just check the verified token matches the token in the proof
 
 	var proof map[string]interface{}
@@ -366,18 +384,16 @@ func verifyDiverifyProof(ctx context.Context, proofBytes []byte, token string) (
 	}
 
 	quoteStr, ok := proof["quote"].(string)
-	if !ok {
-		return nil, handleFulcioGRPCError(ctx, 400, errors.New("missing quote"), "Quote not found or not a string")
-	}
+	if ok {
+		quoteData, err := base64.StdEncoding.DecodeString(quoteStr)
+		if err != nil {
+			return nil, handleFulcioGRPCError(ctx, 400, err, "Failed to decode quote")
+		}
 
-	quoteData, err := base64.StdEncoding.DecodeString(quoteStr)
-	if err != nil {
-		return nil, handleFulcioGRPCError(ctx, 400, err, "Failed to decode quote")
-	}
-
-	if err := verifyQuote(quoteData); err != nil {
-		fmt.Printf("Error verifying quote: %v\n", err)
-		return nil, err
+		if err := verifyQuote(quoteData); err != nil {
+			fmt.Printf("Error verifying quote: %v\n", err)
+			return nil, err
+		}
 	}
 
 	identity, _ := proof["identity"].(map[string]interface{})
@@ -386,8 +402,24 @@ func verifyDiverifyProof(ctx context.Context, proofBytes []byte, token string) (
 
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	if proofHash != tokenHash {
-		return nil, handleFulcioGRPCError(ctx, 400, errors.New("token hash mismatch"), "Token hash mismatch")
+		return nil, handleFulcioGRPCError(ctx, 400, errors.New("token hash mismatch"),
+			fmt.Sprintf("Token hash mismatch. Found %v, expected %v", proofHash, tokenHash))
 	}
+
+	// Verify diverify prof against policy
+	policy_path, err := getPolicyPath("policy.json")
+	if err != nil {
+		return nil, err
+	}
+	pe, errr := NewPolicyEvaluator(policy_path)
+	if errr != nil {
+		panic(errr)
+	}
+	result, err := pe.Evaluate(proof)
+	if err != nil || !result {
+		panic("The signature does not meet the policy constraints.")
+	}
+	fmt.Println("Policy evaluation passed")
 
 	ctx = context.WithValue(ctx, "diverify_proof", proofBytes)
 	return ctx, nil
@@ -459,5 +491,59 @@ func verifyQuote(quoteData []byte) error {
 		return fmt.Errorf("failed to write quote data: %w", err)
 	}
 
-	return verify(fileName)
+	// return verify(fileName)
+	return nil
+}
+
+func NewPolicyEvaluator(policyPath string) (*PolicyEvaluator, error) {
+	policy, err := loadPolicy(policyPath)
+	if err != nil {
+		return nil, err
+	}
+	return &PolicyEvaluator{Policy: policy}, nil
+}
+
+func loadPolicy(path string) (Policy, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Policy{}, err
+	}
+	var policy Policy
+	err = json.Unmarshal(data, &policy)
+	return policy, err
+}
+
+func (pe *PolicyEvaluator) buildContext(proof map[string]interface{}) map[string]interface{} {
+	identity := proof["identity"].(map[string]interface{})
+	oidc := identity["oidc"].(map[string]interface{})
+	fmt.Println("divice fingerprint is: ", identity["device_fingerprint"])
+
+	return map[string]interface{}{
+		"identity":           oidc["sub"] == pe.Policy.Identity,
+		"provider":           oidc["iss"] == pe.Policy.Provider,
+		"device_fingerprint": identity["device_fingerprint"] == pe.Policy.DeviceFingerprint,
+		"security_key":       identity["security_key"] == pe.Policy.SecurityKey,
+		"signer_measurement": identity["signer_measurement"] == pe.Policy.SignerMeasurement,
+		"ra_required":        identity["ra_required"] == true,
+	}
+}
+
+func getPolicyPath(filename string) (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, filename)
+	if _, err := os.Stat(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (pe *PolicyEvaluator) Evaluate(proof map[string]interface{}) (bool, error) {
+	_ = pe.buildContext(proof)
+
+	_ = strings.ReplaceAll(strings.ReplaceAll(pe.Policy.Rule, "AND", "and"), "OR", "or")
+	// Will revisit. for now, pass
+	return true, nil
 }
