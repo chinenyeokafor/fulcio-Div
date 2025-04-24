@@ -108,7 +108,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().String("host", "0.0.0.0", "The host on which to serve requests for HTTP; --http-host is alias")
 	cmd.Flags().String("port", "8080", "The port on which to serve requests for HTTP; --http-port is alias")
 	cmd.Flags().String("grpc-host", "0.0.0.0", "The host on which to serve requests for GRPC")
-	cmd.Flags().String("grpc-port", "8081", "The port on which to serve requests for GRPC")
+	cmd.Flags().String("grpc-port", "8082", "The port on which to serve requests for GRPC")
 	cmd.Flags().String("metrics-port", "2112", "The port on which to serve prometheus metrics endpoint")
 	cmd.Flags().String("legacy-unix-domain-socket", LegacyUnixDomainSocket, "The Unix domain socket used for the legacy gRPC server")
 	cmd.Flags().Duration("read-header-timeout", 10*time.Second, "The time allowed to read the headers of the requests in seconds")

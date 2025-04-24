@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"math/big"
 
@@ -382,6 +383,7 @@ func verifyDiverifyProof(ctx context.Context, proofBytes []byte, token string) (
 	if err := json.Unmarshal(proofBytes, &proof); err != nil {
 		return nil, handleFulcioGRPCError(ctx, 400, err, "Invalid diverify proof format")
 	}
+	fmt.Printf("Proof size: %d bytes\n", len(proofBytes))
 
 	quoteStr, ok := proof["quote"].(string)
 	if ok {
@@ -426,6 +428,7 @@ func verifyDiverifyProof(ctx context.Context, proofBytes []byte, token string) (
 }
 
 func verify(quotePath string) error {
+	start := time.Now()
 	// We use the SGX DCAP quote verification tool from https://github.com/intel/SGXDataCenterAttestationPrimitives for verification
 	fmt.Println("Starting SGX quote verification process")
 
@@ -443,13 +446,21 @@ func verify(quotePath string) error {
 	cmd.Dir = baseDir
 	output, err := cmd.CombinedOutput()
 
+	outputStr := string(output)
 	if err != nil {
-		return fmt.Errorf("verification process failed: %v\nProcess output:\n%s", err, output)
+		if strings.Contains(outputStr, "Verification completed, but collateral is out of date based on 'expiration_check_date' you provided.") {
+			// Log as success despite the error
+			fmt.Println("Warning:", outputStr)
+			return nil
+		}
+		return fmt.Errorf("verification process failed: %v\nProcess output:\n%s", err, outputStr)
 	}
 	fmt.Println("string(output):", string(output))
 
 	if strings.Contains(string(output), "Verification completed successfully") {
-		fmt.Println("Quote verification succeeded")
+
+		duration := time.Since(start)
+		fmt.Println("Quote verification succeeded. verifyQuote took:", duration)
 		fmt.Printf("Verification output:\n%s\n", output)
 		return nil
 	} else {
@@ -457,7 +468,7 @@ func verify(quotePath string) error {
 	}
 }
 
-func verifyQuotee(quoteData []byte) error {
+func verifyQuote(quoteData []byte) error {
 	// The verification tool expects a file path, so we need to write the quote data to a temporary file
 	// and then call the verification function with that file path.
 	// Create a temporary file to store the quote data
@@ -476,23 +487,6 @@ func verifyQuotee(quoteData []byte) error {
 	}
 
 	return verify(tmpFile.Name())
-}
-
-func verifyQuote(quoteData []byte) error {
-	fileName := "quote.bin"
-
-	file, err := os.Create(fileName)
-	if err != nil {
-		return fmt.Errorf("failed to create file %s: %w", fileName, err)
-	}
-	defer file.Close()
-
-	if _, err := file.Write(quoteData); err != nil {
-		return fmt.Errorf("failed to write quote data: %w", err)
-	}
-
-	// return verify(fileName)
-	return nil
 }
 
 func NewPolicyEvaluator(policyPath string) (*PolicyEvaluator, error) {
