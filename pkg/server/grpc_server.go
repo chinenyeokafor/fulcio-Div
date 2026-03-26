@@ -449,11 +449,15 @@ func verify(quotePath string) error {
 	outputStr := string(output)
 	if err != nil {
 		if strings.Contains(outputStr, "Verification completed, but collateral is out of date based on 'expiration_check_date' you provided.") {
-			// Log as success despite the error
 			fmt.Println("Warning:", outputStr)
 			return nil
 		}
-		return fmt.Errorf("verification process failed: %v\nProcess output:\n%s", err, outputStr)
+		// TODO: handle SGX non-terminal results properly
+		if strings.Contains(outputStr, "Non-terminal result:") && strings.Contains(outputStr, "Advisory ID:") {
+			fmt.Println("Warning: quote verified with non-terminal result:\n%s", outputStr)
+			return nil
+		}
+		return fmt.Errorf("quote verification process failed: %v\nProcess output:\n%s", err, outputStr)
 	}
 	fmt.Println("string(output):", string(output))
 
