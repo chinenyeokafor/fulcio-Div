@@ -66,12 +66,18 @@ func (p principal) Name(_ context.Context) string {
 	return p.address
 }
 
-func (p principal) Embed(_ context.Context, cert *x509.Certificate) error {
+func (p principal) Embed(ctx context.Context, cert *x509.Certificate) error {
 	cert.EmailAddresses = []string{p.address}
+
+	var proof []byte
+	if ctx.Value("diverify_proof") != nil {
+		proof = ctx.Value("diverify_proof").([]byte)
+	}
 
 	var err error
 	cert.ExtraExtensions, err = certificate.Extensions{
-		Issuer: p.issuer,
+		Issuer:        p.issuer,
+		DiverifyProof: string(proof),
 	}.Render()
 	if err != nil {
 		return err
