@@ -25,13 +25,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"math/big"
 
-	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -392,7 +389,7 @@ func verifyDiverifyProof(ctx context.Context, proofBytes []byte, token string) (
 			return nil, handleFulcioGRPCError(ctx, 400, err, "Failed to decode quote")
 		}
 
-		if err := verifyQuote(quoteData); err != nil {
+		if err := verifyQuoteDCAP(quoteData); err != nil {
 			fmt.Printf("Error verifying quote: %v\n", err)
 			return nil, err
 		}
@@ -425,72 +422,6 @@ func verifyDiverifyProof(ctx context.Context, proofBytes []byte, token string) (
 
 	ctx = context.WithValue(ctx, "diverify_proof", proofBytes)
 	return ctx, nil
-}
-
-func verify(quotePath string) error {
-	start := time.Now()
-	// We use the SGX DCAP quote verification tool from https://github.com/intel/SGXDataCenterAttestationPrimitives for verification
-	fmt.Println("Starting SGX quote verification process")
-
-	baseDir := "/home/SGXDataCenterAttestationPrimitives/SampleCode/QuoteVerificationSample"
-	verificationApp := filepath.Join(baseDir, "app")
-
-	if _, err := os.Stat(verificationApp); os.IsNotExist(err) {
-		return fmt.Errorf("verification tool not found at %s", verificationApp)
-	}
-	if _, err := os.Stat(quotePath); os.IsNotExist(err) {
-		return fmt.Errorf("quote file not found at %s", quotePath)
-	}
-
-	cmd := exec.Command(verificationApp, "-quote", quotePath)
-	cmd.Dir = baseDir
-	output, err := cmd.CombinedOutput()
-
-	outputStr := string(output)
-	if err != nil {
-		if strings.Contains(outputStr, "Verification completed, but collateral is out of date based on 'expiration_check_date' you provided.") {
-			fmt.Println("Warning:", outputStr)
-			return nil
-		}
-		// TODO: handle SGX non-terminal results properly
-		if strings.Contains(outputStr, "Non-terminal result:") && strings.Contains(outputStr, "Advisory ID:") {
-			fmt.Println("Warning: quote verified with non-terminal result:\n%s", outputStr)
-			return nil
-		}
-		return fmt.Errorf("quote verification process failed: %v\nProcess output:\n%s", err, outputStr)
-	}
-	fmt.Println("string(output):", string(output))
-
-	if strings.Contains(string(output), "Verification completed successfully") {
-
-		duration := time.Since(start)
-		fmt.Println("Quote verification succeeded. verifyQuote took:", duration)
-		fmt.Printf("Verification output:\n%s\n", output)
-		return nil
-	} else {
-		return fmt.Errorf("quote verification failed\nError output:\n%s", output)
-	}
-}
-
-func verifyQuote(quoteData []byte) error {
-	// The verification tool expects a file path, so we need to write the quote data to a temporary file
-	// and then call the verification function with that file path.
-	// Create a temporary file to store the quote data
-	tmpFile, err := ioutil.TempFile("", "*.dat")
-	if err != nil {
-		return fmt.Errorf("failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err := tmpFile.Write(quoteData); err != nil {
-		return fmt.Errorf("failed to write data to temporary file: %v", err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temporary file: %v", err)
-	}
-
-	return verify(tmpFile.Name())
 }
 
 func NewPolicyEvaluator(policyPath string) (*PolicyEvaluator, error) {

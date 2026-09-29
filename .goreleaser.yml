@@ -40,6 +40,10 @@ builds:
   - "{{ .Env.LDFLAGS }}"
   env:
   - PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig/"
+  # SGX DCAP quote verification (see pkg/server/inteldcapverify.go) needs cgo to
+  # call libsgx_dcap_quoteverify.so directly; only useful on amd64,
+  # where SGX exists. Needs libsgx-dcap-quote-verify-dev on the build host.
+  - CGO_ENABLED=1
 
 - id: fulcio-linux-arm64
   binary: fulcio-linux-arm64
