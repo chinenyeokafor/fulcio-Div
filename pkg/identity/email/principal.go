@@ -72,6 +72,7 @@ func (p principal) Embed(ctx context.Context, cert *x509.Certificate) error {
 	var proof []byte
 	if ctx.Value("diverify_proof") != nil {
 		proof = ctx.Value("diverify_proof").([]byte)
+		fmt.Printf("Embedded Diverify proof\n")
 	}
 
 	var err error
